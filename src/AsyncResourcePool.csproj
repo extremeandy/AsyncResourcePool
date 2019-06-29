@@ -11,7 +11,8 @@
     <Copyright>Copyright 2019 (c) Andrew Harward. All rights reserved.</Copyright>
     <RepositoryUrl>https://github.com/extremeandy/AsyncResourcePool</RepositoryUrl>
     <PackageTags>resource pooling</PackageTags>
-    <License>mit</License>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/extremeandy/AsyncResourcePool</PackageProjectUrl>
   </PropertyGroup>
 
   <ItemGroup>
