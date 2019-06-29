@@ -8,6 +8,18 @@
 dotnet add package AsyncResourcePool
 ```
 
+## Options
+
+Behaviour of `AsyncResourcePool` can be specified using `AsyncResourcePoolOptions`.
+
+| Property                         | Default        | Description                                                                                                                                                                                                                                                               |
+| -------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MinNumResources`                | N/A            | The minimum number of resources that will be maintained by the pool. This number of resources will be created regardless of whether or not they are requested. If a resource is requested an allocated, an additional resource will be created to maintain the pool size. |
+| `MaxNumResources`                | `int.MaxValue` | The maximum number of resources that the pool is allowed to create.                                                                                                                                                                                                       |
+| `ResourcesExpireAfter`           | `null`         | If a resource is unused for this time, it will be dispsosed. If this causes the number of available resources to drop below the minimum, additional resources will be created to replace the disposed ones.                                                               |
+| `MaxNumResourceCreationAttempts` | `3`            | Maximum number of attempts for creating a resource before an exception is thrown and passed back to the requestor                                                                                                                                                         |
+| `ResourceCreationRetryInterval`  | 1 second       | Amount of time to wait after a failed resource creation attempt before trying again                                                                                                                                                                                       |
+
 ## Example usage: Connection Pool for Snowflake Connector for .NET
 
 https://github.com/snowflakedb/snowflake-connector-net
