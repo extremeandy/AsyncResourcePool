@@ -7,7 +7,7 @@
     <LangVersion>7.3</LangVersion>
     <Title>AsyncResourcePool</Title>
     <Authors>Andrew Harward</Authors>
-    <Description>Non-blocking, managed pool of re-usable resources, with a specified minimum and optional maximum number of resources, and optional expiry time for resources to be cleaned up if not used for a time.</Description>
+    <Description>Thread-safe, non-blocking, managed pool of re-usable resources, with a specified minimum and optional maximum number of resources, and optional expiry time for resources to be cleaned up if not used for a time.</Description>
     <Copyright>Copyright 2019 (c) Andrew Harward. All rights reserved.</Copyright>
     <RepositoryUrl>https://github.com/extremeandy/AsyncResourcePool</RepositoryUrl>
     <PackageTags>resource pooling</PackageTags>

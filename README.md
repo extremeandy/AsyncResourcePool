@@ -1,6 +1,6 @@
 # AsyncResourcePool
 
-> Non-blocking, managed pool of re-usable resources, with a specified minimum and optional maximum number of resources, and optional expiry time for resources to be cleaned up if not used for a time.
+> Thread-safe, non-blocking, managed pool of re-usable resources, with a specified minimum and optional maximum number of resources, and optional expiry time for resources to be cleaned up if not used for a time.
 
 ## Installation
 
