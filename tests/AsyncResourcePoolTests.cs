@@ -58,7 +58,14 @@ namespace AsyncResourcePool.Tests
                 }
 
                 // Allow some time for the non-awaited tasks to run until they either finish or get stuck waiting
-                await Task.Delay(100);
+                for (var j = 0; j < 10; ++j)
+                {
+                    if (expectedNumResourcesCreated == testHarness.CreatedResources.Count)
+                    {
+                        break;
+                    }
+                    await Task.Delay(100);
+                }
 
                 Assert.Equal(expectedNumResourcesCreated, testHarness.CreatedResources.Count);
             }
@@ -171,6 +178,8 @@ namespace AsyncResourcePool.Tests
 
                 // Wait for the 8 resources to be disposed from expiry.
                 await Task.Delay(expiry * 1.5);
+                // Wait for disposal to finish
+                await initialResourcesDisposedTaskCompletionSource.Task;
 
                 var numResourcesRemainingInPool = testHarness.CreatedResources.Count - numDisposals;
                 Assert.Equal(minNumResources, numResourcesRemainingInPool);
@@ -214,10 +223,28 @@ namespace AsyncResourcePool.Tests
         [Fact(Timeout = Timeout)]
         public async Task AllResourcesShouldBeDisposedAfterConnectionPoolIsDisposedOnceReusableResourceIsDisposed()
         {
-            var testHarness = new TestHarness();
+            var count = 0;
+            var numDisposals = 0;
+            const int numRequestedResources = 3;
+
+            var initialResourcesDisposedTaskCompletionSource = new TaskCompletionSource<bool>();
+
+            async Task<TestResource> DisposeWatchFactory()
+            {
+                return new TestResource(++count, _ =>
+                {
+                    var num = Interlocked.Increment(ref numDisposals);
+                    if (num == numRequestedResources)
+                    {
+                        initialResourcesDisposedTaskCompletionSource.SetResult(true);
+                    }
+                });
+            }
+
+            var testHarness = new TestHarness(DisposeWatchFactory);
 
             ReusableResource<TestResource> reusableResource;
-            using (var sut = CreateSut(testHarness, 3, 5))
+            using (var sut = CreateSut(testHarness, numRequestedResources, 5))
             {
                 reusableResource = await sut.Get();
 
@@ -225,6 +252,9 @@ namespace AsyncResourcePool.Tests
             }
 
             reusableResource.Dispose();
+
+            // Wait for all the disposals to be handled async
+            await initialResourcesDisposedTaskCompletionSource.Task;
 
             // The pool should still handle disposal of the resource wrapped by the disposed
             // ReusableResource even when the pool itself has already been disposed.

@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -9,22 +10,26 @@ namespace AsyncResourcePool
 {
     public sealed class AsyncResourcePool<TResource> : IAsyncResourcePool<TResource>
     {
+        private readonly object _stateLock = new object();
+        private readonly object _pendingResourceRequestLock = new object();
         private readonly int _minNumResources;
         private readonly int _maxNumResources;
         private readonly TimeSpan? _resourcesExpireAfter;
         private readonly int _maxNumResourceCreationAttempts;
         private readonly TimeSpan _resourceCreationRetryInterval;
         private readonly Func<Task<TResource>> _resourceTaskFactory;
-        private readonly Queue<TimestampedResource> _availableResources;
-        private readonly Queue<ResourceRequestMessage> _pendingResourceRequests;
+        private readonly ConcurrentQueue<TimestampedResource> _availableResources;
+        private readonly ConcurrentQueue<ResourceRequestMessage> _pendingResourceRequests;
         private readonly ActionBlock<IResourceMessage> _messageHandler;
 
         /// <summary>
         /// The total number of resources produced, including available resources and resources
         /// that are currently in use
         /// </summary>
-        private int _numResources = 0;
+        private int _numResourcesActive = 0;
         private int _numResourcesInUse = 0;
+        private int _numResourcesInLimbo = 0;
+        private ResourceRequestMessage _pendingResourceRequest = null;
 
         /// <summary>
         /// This constructor should be used only if asynchronous resource creation is not available
@@ -48,8 +53,8 @@ namespace AsyncResourcePool
             _resourcesExpireAfter = options.ResourcesExpireAfter;
             _maxNumResourceCreationAttempts = options.MaxNumResourceCreationAttempts;
             _resourceCreationRetryInterval = options.ResourceCreationRetryInterval;
-            _availableResources = new Queue<TimestampedResource>();
-            _pendingResourceRequests = new Queue<ResourceRequestMessage>();
+            _availableResources = new ConcurrentQueue<TimestampedResource>();
+            _pendingResourceRequests = new ConcurrentQueue<ResourceRequestMessage>();
             _resourceTaskFactory = resourceTaskFactory;
 
             // Important: These functions must be called after all instance members have been initialised!
@@ -119,10 +124,21 @@ namespace AsyncResourcePool
 
         private void ClearAllPendingRequests(Exception ex)
         {
-            while (_pendingResourceRequests.Count > 0)
+            lock(_pendingResourceRequestLock)
             {
-                var request = _pendingResourceRequests.Dequeue();
-                request.TaskCompletionSource.SetException(ex);
+                while (!(_pendingResourceRequest == null && _pendingResourceRequests.IsEmpty))
+                {
+                    ResourceRequestMessage request = _pendingResourceRequest;
+                    if (request == null)
+                    {
+                        _pendingResourceRequests.TryDequeue(out request);
+                    }
+                    else
+                    {
+                        _pendingResourceRequest = null;
+                    }
+                    request?.TaskCompletionSource.SetException(ex);
+                }
             }
         }
 
@@ -168,17 +184,25 @@ namespace AsyncResourcePool
         private ReusableResource<TResource> TryGetReusableResource()
         {
             ReusableResource<TResource> reusableResource = null;
-            while (_availableResources.Count > 0)
+            while (!_availableResources.IsEmpty)
             {
-                var timestampedResource = _availableResources.Dequeue();
-                var resource = timestampedResource.Resource;
-                if (IsResourceExpired(timestampedResource))
+                TimestampedResource timestampedResource = null;
+                if (_availableResources.TryDequeue(out timestampedResource))
                 {
-                    DisposeResource(resource);
-                }
-                else
-                {
-                    reusableResource = GetReusableResource(resource);
+                    lock(_stateLock)
+                    {
+                        var resource = timestampedResource.Resource;
+                        if (IsResourceExpired(timestampedResource))
+                        {
+                            DisposeResource(resource);
+                        }
+                        else
+                        {
+                            Interlocked.Increment(ref _numResourcesInLimbo);
+                            reusableResource = GetReusableResource(resource);
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -189,23 +213,38 @@ namespace AsyncResourcePool
 
         private void HandlePendingResourceRequests()
         {
-            while (_pendingResourceRequests.Count > 0)
+            lock(_pendingResourceRequestLock)
             {
-                if (_pendingResourceRequests.Peek().CancellationToken.IsCancellationRequested)
+                while (!(_pendingResourceRequest == null && _pendingResourceRequests.IsEmpty))
                 {
-                    _pendingResourceRequests.Dequeue(); // Throw away cancelled requests
-                    continue;
-                }
+                    if (_pendingResourceRequest == null)
+                    {
+                        _pendingResourceRequests.TryDequeue(out _pendingResourceRequest);
+                    }
 
-                var result = TryGetReusableResource();
-                if (result != null)
-                {
-                    var request = _pendingResourceRequests.Dequeue();
-                    request.TaskCompletionSource.SetResult(result);
-                }
-                else
-                {
-                    break;
+                    // Throw away cancelled requests
+                    if (_pendingResourceRequest == null ||
+                            _pendingResourceRequest.CancellationToken.IsCancellationRequested)
+                    {
+                        _pendingResourceRequest = null;
+                        continue;
+                    }
+
+                    var resource = TryGetReusableResource();
+                    if (resource != null)
+                    {
+                        lock(_stateLock)
+                        {
+                            Interlocked.Decrement(ref _numResourcesInLimbo);
+                            Interlocked.Increment(ref _numResourcesInUse);
+                        }
+                        _pendingResourceRequest.TaskCompletionSource.SetResult(resource);
+                        _pendingResourceRequest = null;
+                    }
+                    else
+                    {
+                        break;
+                    }
                 }
             }
         }
@@ -214,22 +253,30 @@ namespace AsyncResourcePool
         {
             var resource = resourceAvailableMessage.Resource;
             var timestampedResource = TimestampedResource.Create(resource);
-            _availableResources.Enqueue(timestampedResource);
+            lock(_stateLock)
+            {
+                Interlocked.Decrement(ref _numResourcesInLimbo);
+                Interlocked.Increment(ref _numResourcesActive);
+                _availableResources.Enqueue(timestampedResource);
+            }
         }
 
         private void HandlePurgeExpiredResource(PurgeExpiredResourcesMessage purgeExpiredResourcesMessage)
         {
             var nonExpiredResources = new List<TimestampedResource>();
-            while (_availableResources.Count > 0)
+            while (!_availableResources.IsEmpty)
             {
-                var timestampedResource = _availableResources.Dequeue();
-                if (IsResourceExpired(timestampedResource))
+                TimestampedResource timestampedResource = null;
+                if (_availableResources.TryDequeue(out timestampedResource))
                 {
-                    DisposeResource(timestampedResource.Resource);
-                }
-                else
-                {
-                    nonExpiredResources.Add(timestampedResource);
+                    if (IsResourceExpired(timestampedResource))
+                    {
+                        DisposeResource(timestampedResource.Resource);
+                    }
+                    else
+                    {
+                        nonExpiredResources.Add(timestampedResource);
+                    }
                 }
             }
 
@@ -246,12 +293,13 @@ namespace AsyncResourcePool
         /// </summary>
         private async void HandleEnsureAvailableResourcesMessage(EnsureAvailableResourcesMessage ensureAvailableResourcesMessage)
         {
-            var effectiveNumResourcesAvailable = _numResources - _numResourcesInUse;
-            var availableResourcesGap = _minNumResources - effectiveNumResourcesAvailable;
-            var remainingCapacity = _maxNumResources - _numResources;
+            IEnumerable<Task> createResourceTasks = null;
+            var effectiveNumResourcesAvailable = _numResourcesActive - _numResourcesInUse;
+            var availableResourcesGap = _minNumResources - effectiveNumResourcesAvailable - _numResourcesInLimbo;
+            var remainingCapacity = _maxNumResources - _numResourcesActive - _numResourcesInLimbo;
             var numResourcesToCreate = Math.Max(0, Math.Min(availableResourcesGap, remainingCapacity));
 
-            var createResourceTasks = Enumerable.Range(0, numResourcesToCreate)
+            createResourceTasks = Enumerable.Range(0, numResourcesToCreate)
                 .Select(_ => TryCreateResource());
 
             try
@@ -270,10 +318,10 @@ namespace AsyncResourcePool
             var resourceTask = _resourceTaskFactory();
             try
             {
-                // Increment before we wait for the task. Otherwise, while
-                // waiting, another thread may read the incorrect value.
-                Interlocked.Increment(ref _numResources);
-
+                lock(_stateLock)
+                {
+                    Interlocked.Increment(ref _numResourcesInLimbo);
+                }
                 var resource = await resourceTask;
 
                 MakeResourceAvailable(resource);
@@ -281,7 +329,10 @@ namespace AsyncResourcePool
             catch (Exception)
             {
                 // Roll back!
-                Interlocked.Decrement(ref _numResources);
+                lock(_stateLock)
+                {
+                    Interlocked.Decrement(ref _numResourcesInLimbo);
+                }
                 throw;
             }
         }
@@ -303,10 +354,14 @@ namespace AsyncResourcePool
 
         private ReusableResource<TResource> GetReusableResource(TResource resource)
         {
-            Interlocked.Increment(ref _numResourcesInUse);
             return new ReusableResource<TResource>(resource, () =>
             {
-                Interlocked.Decrement(ref _numResourcesInUse);
+                lock(_stateLock)
+                {
+                    Interlocked.Decrement(ref _numResourcesInUse);
+                    Interlocked.Decrement(ref _numResourcesActive);
+                    Interlocked.Increment(ref _numResourcesInLimbo);
+                }
                 MakeResourceAvailable(resource);
             });
         }
@@ -326,7 +381,10 @@ namespace AsyncResourcePool
 
         private async void DisposeResource(TResource resource)
         {
-            Interlocked.Decrement(ref _numResources);
+            lock(_stateLock)
+            {
+                Interlocked.Decrement(ref _numResourcesActive);
+            }
 
             if (resource is IDisposable disposableResource)
             {
@@ -340,17 +398,31 @@ namespace AsyncResourcePool
             await _messageHandler.Completion; // Even after we mark Complete, still need to finish processing.
 
             // Clean up any remaining requests.
-            while (_pendingResourceRequests.Count > 0)
+            lock(_pendingResourceRequestLock)
             {
-                var request = _pendingResourceRequests.Dequeue();
-                request.TaskCompletionSource.SetException(GetObjectDisposedException());
+                while (!(_pendingResourceRequest == null && _pendingResourceRequests.IsEmpty))
+                {
+                    ResourceRequestMessage request = _pendingResourceRequest;
+                    if (request == null)
+                    {
+                        _pendingResourceRequests.TryDequeue(out request);
+                    }
+                    else
+                    {
+                        _pendingResourceRequest = null;
+                    }
+                    request?.TaskCompletionSource.SetException(GetObjectDisposedException());
+                }
             }
 
             // Clean up any remaining resources.
-            while (_availableResources.Count > 0)
+            while (!_availableResources.IsEmpty)
             {
-                var timestampedResource = _availableResources.Dequeue();
-                DisposeResource(timestampedResource.Resource);
+                TimestampedResource timestampedResource = null;
+                if (_availableResources.TryDequeue(out timestampedResource))
+                {
+                    DisposeResource(timestampedResource.Resource);
+                }
             }
         }
 
