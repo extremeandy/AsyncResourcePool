@@ -133,36 +133,26 @@ namespace AsyncResourcePool
         {
             if (_resourcesExpireAfter != null)
             {
-                using (var purgeCancellationTokenSource = new CancellationTokenSource())
+                // Run the clean-up 10X as often as resources will expire. This will ensure that we
+                // keep the number of resources that have expired in the queue to a minimum.
+                const int frequency = 10;
+                var interval = new TimeSpan(_resourcesExpireAfter.Value.Ticks / frequency);
+                var timer = new Timer(
+                    _ => _messageHandler.Post(new PurgeExpiredResourcesMessage()),
+                    null,
+                    interval,
+                    interval);
+
+                try
                 {
-                    var purgeCancellationToken = purgeCancellationTokenSource.Token;
-
-#pragma warning disable 4014
-                    Task.Run(async () =>
-#pragma warning restore 4014
-                    {
-                        while (!purgeCancellationToken.IsCancellationRequested)
-                        {
-                            // Run the clean-up 10X as often as resources will expire. This will ensure that we
-                            // keep the number of resources that have expired in the queue to a minimum.
-                            const int frequency = 10;
-                            await Task.Delay(new TimeSpan(_resourcesExpireAfter.Value.Ticks / frequency), purgeCancellationToken);
-                            var purgeMessage = new PurgeExpiredResourcesMessage();
-                            _messageHandler.Post(purgeMessage);
-                        }
-                    }, purgeCancellationToken);
-
-                    try
-                    {
-                        await _messageHandler.Completion;
-                    }
-                    finally
-                    {
-                        purgeCancellationTokenSource.Cancel();
-                    }
+                    await _messageHandler.Completion;
+                }
+                finally
+                {
+                    timer.Dispose();
                 }
             }
-
+            
         }
 
         private ReusableResource<TResource> TryGetReusableResource()
