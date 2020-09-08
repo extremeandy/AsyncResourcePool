@@ -138,7 +138,7 @@ namespace AsyncResourcePool
                 const int frequency = 10;
                 var interval = new TimeSpan(_resourcesExpireAfter.Value.Ticks / frequency);
                 var timer = new Timer(
-                    _ => _messageHandler.Post(new PurgeExpiredResourcesMessage()),
+                    _ => _messageHandler.Post(PurgeExpiredResourcesMessage.Instance),
                     null,
                     interval,
                     interval);
@@ -373,6 +373,11 @@ namespace AsyncResourcePool
 
         private sealed class PurgeExpiredResourcesMessage : IResourceMessage
         {
+            private PurgeExpiredResourcesMessage()
+            {
+            }
+
+            public static readonly PurgeExpiredResourcesMessage Instance = new PurgeExpiredResourcesMessage();
         }
 
         private sealed class EnsureAvailableResourcesMessage : IResourceMessage
