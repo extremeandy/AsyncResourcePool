@@ -402,7 +402,7 @@ namespace AsyncResourcePool
         {
         }
 
-        private sealed class TimestampedResource
+        private readonly struct TimestampedResource
         {
             private TimestampedResource(TResource resource, DateTime created)
             {
