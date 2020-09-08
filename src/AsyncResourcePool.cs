@@ -247,7 +247,8 @@ namespace AsyncResourcePool
         private async void HandleEnsureAvailableResourcesMessage(EnsureAvailableResourcesMessage ensureAvailableResourcesMessage)
         {
             var effectiveNumResourcesAvailable = _numResources - _numResourcesInUse;
-            var availableResourcesGap = _minNumResources - effectiveNumResourcesAvailable;
+            var numResourcesRequired = Math.Max(_minNumResources, _pendingResourceRequests.Count);
+            var availableResourcesGap = numResourcesRequired - effectiveNumResourcesAvailable;
             var remainingCapacity = _maxNumResources - _numResources;
             var numResourcesToCreate = Math.Max(0, Math.Min(availableResourcesGap, remainingCapacity));
 

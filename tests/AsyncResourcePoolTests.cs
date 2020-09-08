@@ -25,6 +25,26 @@ namespace AsyncResourcePool.Tests
             }
         }
 
+        [Fact(Timeout = Timeout)]
+        public async Task ShouldCreateResourcesWhenMinNumResourcesIsZero()
+        {
+            var testHarness = new TestHarness();
+
+            const int minNumResources = 0;
+            const int numResourcesToCreate = 5;
+
+            using (var sut = CreateSut(testHarness, minNumResources, minNumResources + 10))
+            {
+                var tasks = Enumerable.Range(0, numResourcesToCreate)
+                    .Select(_ => sut.Get());
+
+                await Task.WhenAll(tasks);
+
+                await Task.Delay(100);
+                Assert.Equal(numResourcesToCreate, testHarness.CreatedResources.Count);
+            }
+        }
+
         /// <summary>
         /// Basically we want the pool to always maintain a pool of minNumResources as resources are handed out,
         /// up to a maximum of maxNumResources
