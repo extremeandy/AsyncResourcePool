@@ -329,6 +329,20 @@ namespace AsyncResourcePool.Tests
             Assert.Equal(firstExpectedTask, firstActualTask);
         }
 
+        [Fact(Timeout = Timeout)]
+        public async Task Get_ShouldThrowTaskCanceledException_WhenCancellationTokenIsCancelled()
+        {
+            var testHarness = new TestHarness(delay: 1000);
+
+            using (var sut = CreateSut(testHarness, 1, 1))
+            {
+                // Cancel after 100ms, resource will take 1000ms to create so it should cancel
+                var cancellationTokenSource = new CancellationTokenSource(100);
+
+                await Assert.ThrowsAsync<TaskCanceledException>(() => sut.Get(cancellationTokenSource.Token));
+            }
+        }
+
         private AsyncResourcePool<TestResource> CreateSut(TestHarness testHarness,
             int minNumResources,
             int maxNumResources,

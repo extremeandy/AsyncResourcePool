@@ -183,7 +183,9 @@ namespace AsyncResourcePool
             {
                 if (_pendingResourceRequests.Peek().CancellationToken.IsCancellationRequested)
                 {
-                    _pendingResourceRequests.Dequeue(); // Throw away cancelled requests
+                    var request = _pendingResourceRequests.Dequeue();
+                    request.TaskCompletionSource.SetCanceled();
+
                     continue;
                 }
 
