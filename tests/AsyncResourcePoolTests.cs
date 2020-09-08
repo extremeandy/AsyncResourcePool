@@ -1,6 +1,5 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -42,15 +41,33 @@ namespace AsyncResourcePool.Tests
         [InlineData(15)]
         public async Task Get_ShouldCauseAdditionalResourceCreation_WhenResourcesAreRetrieved_UpToMaxNumResources(int numResourcesToRetrieve)
         {
-            var testHarness = new TestHarness();
-
             const int minNumResources = 5;
             const int maxNumResources = 10;
+
+            var minimumResourcesCreated = new TaskCompletionSource<bool>();
+            var count = 0;
+            Task<TestResource> ResourceFactory()
+            {
+                var value = Interlocked.Increment(ref count);
+                var result = new TestResource(value);
+                if (value == minNumResources)
+                {
+                    minimumResourcesCreated.SetResult(true);
+                }
+
+                return Task.FromResult(result);
+            }
+
+            var testHarness = new TestHarness(ResourceFactory);
 
             var expectedNumResourcesCreated = Math.Min(minNumResources + numResourcesToRetrieve, maxNumResources);
 
             using (var sut = CreateSut(testHarness, minNumResources, maxNumResources))
             {
+                // Make sure we wait for all resources to be created initially. Without this, this test was
+                // passing when the actual implementation was failing under real conditions.
+                await minimumResourcesCreated.Task;
+
                 for (var i = 0; i < numResourcesToRetrieve; ++i)
                 {
                     // Don't await: once we get past maxNumResources, if we await, we'll be waiting an awful long time
@@ -94,7 +111,7 @@ namespace AsyncResourcePool.Tests
         public async Task Get_ShouldThrowException_WhenResourceFactoryThrowsException()
         {
             var exception = new Exception("Expect to receive me from Get");
-
+            
             const int maxNumAttempts = 3;
             async Task<TestResource> FailingFactory()
             {
@@ -215,12 +232,12 @@ namespace AsyncResourcePool.Tests
         public async Task AllResourcesShouldBeDisposedAfterConnectionPoolIsDisposedOnceReusableResourceIsDisposed()
         {
             var testHarness = new TestHarness();
-
+            
             ReusableResource<TestResource> reusableResource;
             using (var sut = CreateSut(testHarness, 3, 5))
             {
                 reusableResource = await sut.Get();
-
+                
                 // Dispose the pool *before* we dispose reusableResource.
             }
 

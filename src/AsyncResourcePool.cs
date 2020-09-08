@@ -168,7 +168,7 @@ namespace AsyncResourcePool
         private ReusableResource<TResource> TryGetReusableResource()
         {
             ReusableResource<TResource> reusableResource = null;
-            while (_availableResources.Count > 0)
+            while (_availableResources.Count > 0 && reusableResource is null)
             {
                 var timestampedResource = _availableResources.Dequeue();
                 var resource = timestampedResource.Resource;
