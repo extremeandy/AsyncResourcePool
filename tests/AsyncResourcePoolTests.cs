@@ -110,7 +110,7 @@ namespace AsyncResourcePool.Tests
             async Task<TestResource> FailingFactory()
             {
                 // Only fail the first maxNumAttempts-1 times, THEN succeed.
-                if (++count < maxNumAttempts)
+                if (Interlocked.Increment(ref count) < maxNumAttempts)
                 {
                     throw exception;
                 }
@@ -154,7 +154,7 @@ namespace AsyncResourcePool.Tests
 
             async Task<TestResource> DisposeWatchFactory()
             {
-                return new TestResource(++count, _ => Interlocked.Increment(ref numDisposals));
+                return new TestResource(Interlocked.Increment(ref count), _ => Interlocked.Increment(ref numDisposals));
             }
 
             var testHarness = new TestHarness(DisposeWatchFactory);
@@ -225,10 +225,10 @@ namespace AsyncResourcePool.Tests
                 300
             };
 
-            var index = 0;
+            var index = -1;
             async Task<TestResource> ResourceFactory()
             {
-                var delay = delays[index++];
+                var delay = delays[Interlocked.Increment(ref index)];
                 await Task.Delay(delay);
                 return new TestResource(delay);
             }
@@ -257,7 +257,7 @@ namespace AsyncResourcePool.Tests
             using (var sut = CreateSut(testHarness, 3, 5))
             {
                 reusableResource = await sut.Get();
-                
+
                 // Dispose the pool *before* we dispose reusableResource.
             }
 
@@ -265,7 +265,8 @@ namespace AsyncResourcePool.Tests
 
             // The pool should still handle disposal of the resource wrapped by the disposed
             // ReusableResource even when the pool itself has already been disposed.
-            Assert.All(testHarness.CreatedResources, resource => Assert.True(resource.IsDisposed));
+            var isDisposedTasks = testHarness.CreatedResources.Select(r => r.IsDisposedTask);
+            await Task.WhenAll(isDisposedTasks);
         }
 
         [Fact(Timeout = Timeout)]
@@ -280,15 +281,18 @@ namespace AsyncResourcePool.Tests
                 // Dispose the pool *without* ever disposing reusableResource.
             }
 
+            // Allow some time for the disposal to possibly happen, because it might (well, does) happen on a different
+            // thread.
+            await Task.Delay(Timeout / 2);
+
             // The inner resource wrapped by the ReusableResource should still be alive
             Assert.False(reusableResource.Resource.IsDisposed);
         }
 
         [Fact(Timeout = Timeout)]
-        public async Task SlowDisposingResources_ShouldNotBlock()
+        public async Task SlowDisposingResources_ShouldNotBlockResourceCreation()
         {
             var count = 0;
-            var disposalDelay = TimeSpan.FromMilliseconds(1000);
             var expiryTime = TimeSpan.FromMilliseconds(500);
 
             var firstResourceFinishedDisposing = new TaskCompletionSource<bool>();
@@ -296,17 +300,18 @@ namespace AsyncResourcePool.Tests
 
             async Task<TestResource> SlowDisposingResourceFactory()
             {
-                var countClosure = count;
-
-                if (count == 1)
+                var incrementedCount = Interlocked.Increment(ref count);
+                if (incrementedCount == 2)
                 {
                     secondResourceCreated.SetResult(true);
                 }
 
-                return new TestResource(++count, _ =>
+                return new TestResource(incrementedCount, _ =>
                 {
-                    Thread.Sleep(disposalDelay);
-                    if (countClosure == 0)
+                    // Don't dispose until the 2nd resource is created. If this task never completes, it means that
+                    // the 2nd resource is blocked waiting for this resource to dispose!
+                    secondResourceCreated.Task.Wait();
+                    if (incrementedCount == 1)
                     {
                         firstResourceFinishedDisposing.SetResult(true);
                     }
@@ -317,16 +322,9 @@ namespace AsyncResourcePool.Tests
 
             using (var sut = CreateSut(testHarness, 1, 1, expiry: expiryTime))
             {
-                // Allow time for the first automatically created resource to expire. It should be re-created automatically
-                // by the expiry purge handler.
-                await Task.Delay(expiryTime * 1.1);
+                await secondResourceCreated.Task;
+                await firstResourceFinishedDisposing.Task;
             }
-
-            var firstActualTask = await Task.WhenAny(firstResourceFinishedDisposing.Task, secondResourceCreated.Task);
-
-            var firstExpectedTask = secondResourceCreated.Task;
-
-            Assert.Equal(firstExpectedTask, firstActualTask);
         }
 
         [Fact(Timeout = Timeout)]
@@ -343,7 +341,7 @@ namespace AsyncResourcePool.Tests
             }
         }
 
-        private AsyncResourcePool<TestResource> CreateSut(TestHarness testHarness,
+        private static AsyncResourcePool<TestResource> CreateSut(TestHarness testHarness,
             int minNumResources,
             int maxNumResources,
             TimeSpan? expiry = null,
@@ -379,10 +377,7 @@ namespace AsyncResourcePool.Tests
                 _delay = delay;
             }
 
-            private int GetNextValue()
-            {
-                return _value++;
-            }
+            private int GetNextValue() => Interlocked.Increment(ref _value);
 
             public IReadOnlyCollection<TestResource> CreatedResources => _createdResources;
 
@@ -409,10 +404,12 @@ namespace AsyncResourcePool.Tests
         private class TestResource : IDisposable
         {
             private readonly Action<TestResource> _disposeAction;
+            private readonly TaskCompletionSource<bool> _isDisposedTaskCompletionSource;
 
             public TestResource(int value, Action<TestResource> disposeAction = null)
             {
                 _disposeAction = disposeAction;
+                _isDisposedTaskCompletionSource = new TaskCompletionSource<bool>();
                 Value = value;
             }
 
@@ -420,9 +417,12 @@ namespace AsyncResourcePool.Tests
 
             public bool IsDisposed { get; private set; }
 
+            public Task IsDisposedTask => _isDisposedTaskCompletionSource.Task;
+
             public void Dispose()
             {
                 IsDisposed = true;
+                _isDisposedTaskCompletionSource.SetResult(true);
                 _disposeAction?.Invoke(this);
 
             }
