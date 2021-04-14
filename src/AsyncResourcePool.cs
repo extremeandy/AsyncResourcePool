@@ -152,7 +152,6 @@ namespace AsyncResourcePool
                     timer.Dispose();
                 }
             }
-            
         }
 
         private ReusableResource<TResource> TryGetReusableResource()
@@ -358,9 +357,9 @@ namespace AsyncResourcePool
                 CancellationToken = cancellationToken;
             }
 
-            public TaskCompletionSource<ReusableResource<TResource>> TaskCompletionSource { get; }
+            public readonly TaskCompletionSource<ReusableResource<TResource>> TaskCompletionSource;
 
-            public CancellationToken CancellationToken { get; }
+            public readonly CancellationToken CancellationToken;
         }
 
         private sealed class ResourceAvailableMessage : IResourceMessage
@@ -370,7 +369,7 @@ namespace AsyncResourcePool
                 Resource = resource;
             }
 
-            public TResource Resource { get; }
+            public readonly TResource Resource;
         }
 
         private sealed class PurgeExpiredResourcesMessage : IResourceMessage
@@ -389,7 +388,7 @@ namespace AsyncResourcePool
                 AttemptNumber = attemptNumber;
             }
 
-            public int AttemptNumber { get; }
+            public readonly int AttemptNumber;
         }
 
         private sealed class CreateResourceFailedMessage : IResourceMessage
@@ -400,9 +399,9 @@ namespace AsyncResourcePool
                 AttemptNumber = attemptNumber;
             }
 
-            public Exception Exception { get; }
+            public readonly Exception Exception;
 
-            public int AttemptNumber { get; }
+            public readonly int AttemptNumber;
         }
 
         private interface IResourceMessage
@@ -417,14 +416,12 @@ namespace AsyncResourcePool
                 Created = created;
             }
 
-            public TResource Resource { get; }
+            public readonly TResource Resource;
 
-            public DateTime Created { get; }
+            public readonly DateTime Created;
 
             public static TimestampedResource Create(TResource resource)
-            {
-                return new TimestampedResource(resource, DateTime.Now);
-            }
+                => new TimestampedResource(resource, DateTime.Now);
         }
     }
 }
