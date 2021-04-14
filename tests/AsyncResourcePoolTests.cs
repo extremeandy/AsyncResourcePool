@@ -45,6 +45,156 @@ namespace AsyncResourcePool.Tests
             }
         }
 
+        [Fact(Timeout = Timeout)]
+        public async Task TryGetExisting_ShouldReturnTrue_WhenResourceExists()
+        {
+            var testHarness = new TestHarness();
+
+            const int minNumResources = 1;
+            const int maxNumResources = 1;
+
+            using (var sut = CreateSut(testHarness, minNumResources, maxNumResources))
+            {
+                await Task.Delay(100); // Allow time for resource to be created
+
+                var result = sut.TryGetExisting(out _);
+                
+                Assert.True(result);
+            }
+        }
+
+        [Fact(Timeout = Timeout)]
+        public async Task TryRemove_ShouldReturnTrue_WhenResourceExists()
+        {
+            var testHarness = new TestHarness();
+
+            const int minNumResources = 1;
+            const int maxNumResources = 1;
+
+            using (var sut = CreateSut(testHarness, minNumResources, maxNumResources))
+            {
+                await Task.Delay(100); // Allow time for resource to be created
+
+                var result = sut.TryRemove(out _);
+
+                Assert.True(result);
+            }
+        }
+
+        [Fact]
+        public void TryGetExisting_ShouldReturnFalse_WhenResourceDoesNotExist()
+        {
+            var testHarness = new TestHarness();
+
+            const int minNumResources = 0;
+            const int maxNumResources = 1;
+
+            using (var sut = CreateSut(testHarness, minNumResources, maxNumResources))
+            {
+                // Minimum is zero so no resources should have been created
+                var result = sut.TryGetExisting(out _);
+
+                Assert.False(result);
+            }
+        }
+
+        [Fact]
+        public void TryRemove_ShouldReturnFalse_WhenResourceDoesNotExist()
+        {
+            var testHarness = new TestHarness();
+
+            const int minNumResources = 0;
+            const int maxNumResources = 1;
+
+            using (var sut = CreateSut(testHarness, minNumResources, maxNumResources))
+            {
+                // Minimum is zero so no resources should have been created
+                var result = sut.TryRemove(out _);
+
+                Assert.False(result);
+            }
+        }
+
+        [Fact(Timeout = Timeout)]
+        public async Task TryRemove_ShouldCauseAdditionalResourceToBeCreated_WhenRemoveSucceeds()
+        {
+            var testHarness = new TestHarness();
+
+            const int minNumResources = 1;
+            const int maxNumResources = 1;
+
+            using (var sut = CreateSut(testHarness, minNumResources, maxNumResources))
+            {
+                await Task.Delay(100); // Allow time for resource creation
+
+                var result = sut.TryRemove(out _);
+                Assert.True(result);
+
+                await Task.Delay(100); // Allow time for replacement resource creation
+                Assert.Equal(minNumResources + 1, testHarness.CreatedResources.Count);
+            }
+        }
+
+        [Fact]
+        public void TryAdd_ShouldReturnTrue_WhenMaxNumResourcesNotReached()
+        {
+            var testHarness = new TestHarness();
+
+            const int minNumResources = 0;
+            const int maxNumResources = 1;
+
+            using (var sut = CreateSut(testHarness, minNumResources, maxNumResources))
+            {
+                var resource = new TestResource(28371273);
+
+                var result = sut.TryAdd(resource);
+
+                Assert.True(result);
+            }
+        }
+
+        [Fact(Timeout = Timeout)]
+        public async Task TryAdd_ShouldReturnFalse_WhenMaxNumResourcesReached()
+        {
+            var testHarness = new TestHarness();
+
+            const int minNumResources = 1;
+            const int maxNumResources = 1;
+
+            using (var sut = CreateSut(testHarness, minNumResources, maxNumResources))
+            {
+                await Task.Delay(100); // Allow time for resource creation
+                var resource = new TestResource(28371273);
+
+                var result = sut.TryAdd(resource);
+
+                Assert.False(result);
+            }
+        }
+
+        [Fact]
+        public void TryAdd_ShouldMakeResourceImmediatelyAvailable()
+        {
+            var testHarness = new TestHarness();
+
+            const int minNumResources = 0;
+            const int maxNumResources = 1;
+
+            using (var sut = CreateSut(testHarness, minNumResources, maxNumResources))
+            {
+                var resource = new TestResource(28371273);
+
+                var addResult = sut.TryAdd(resource);
+                Assert.True(addResult);
+
+                var tryGetExistingResult = sut.TryGetExisting(out var reusableResource);
+                Assert.True(tryGetExistingResult);
+                Assert.Same(resource, reusableResource.Resource);
+
+                Assert.Equal(0, testHarness.CreatedResources.Count);
+            }
+        }
+
         /// <summary>
         /// Basically we want the pool to always maintain a pool of minNumResources as resources are handed out,
         /// up to a maximum of maxNumResources
@@ -354,6 +504,7 @@ namespace AsyncResourcePool.Tests
                 resourcesExpireAfter: expiry,
                 maxNumResourceCreationAttempts: maxNumResourceCreationAttempts,
                 resourceCreationRetryInterval: resourceCreationRetryInterval ?? TimeSpan.FromMilliseconds(10));
+
             return new AsyncResourcePool<TestResource>(testHarness.ResourceFactory, options);
         }
 
