@@ -70,12 +70,28 @@ namespace AsyncResourcePool
                         _pendingResourceRequests.Enqueue(resourceRequest);
                         HandlePendingResourceRequests();
                         break;
+                    case ExistingResourceRequestMessage existingResourceRequest:
+                        HandleExistingResourceRequest(existingResourceRequest);
+                        break;
+                    case RemoveResourceRequestMessage removeResourceRequest:
+                        HandleRemoveResourceRequest(removeResourceRequest);
+                        break;
                     case ResourceAvailableMessage resourceAvailableMessage:
                         HandleResourceAvailable(resourceAvailableMessage);
 
                         // A new resource is available, so handle any pending requests
                         HandlePendingResourceRequests();
                         break;
+                    case AddResourceMessage addResourceMessage:
+                        HandleAddResource(addResourceMessage);
+
+                        if (addResourceMessage.ResultTaskCompletionSource.Task.Result)
+                        {
+                            // A new resource is available, so handle any pending requests
+                            HandlePendingResourceRequests();
+                        }
+                        break;
+
                     case PurgeExpiredResourcesMessage purgeExpiredResources:
                         HandlePurgeExpiredResource(purgeExpiredResources);
                         break;
@@ -156,24 +172,35 @@ namespace AsyncResourcePool
 
         private ReusableResource<TResource> TryGetReusableResource()
         {
-            ReusableResource<TResource> reusableResource = null;
-            while (_availableResources.Count > 0 && reusableResource is null)
+            if (TryGetResource(out var resource))
+            {
+                return GetReusableResource(resource);
+            }
+
+            return null;
+        }
+
+        private bool TryGetResource(out TResource resource)
+        {
+            resource = default;
+            var result = false;
+            while (_availableResources.Count > 0 && !result)
             {
                 var timestampedResource = _availableResources.Dequeue();
-                var resource = timestampedResource.Resource;
+                resource = timestampedResource.Resource;
                 if (IsResourceExpired(timestampedResource))
                 {
                     DisposeResource(resource);
                 }
                 else
                 {
-                    reusableResource = GetReusableResource(resource);
+                    result = true;
                 }
             }
 
             _messageHandler.Post(new EnsureAvailableResourcesMessage());
 
-            return reusableResource;
+            return result;
         }
 
         private void HandlePendingResourceRequests()
@@ -201,11 +228,42 @@ namespace AsyncResourcePool
             }
         }
 
+        private void HandleExistingResourceRequest(ExistingResourceRequestMessage existingResourceRequest)
+        {
+            var result = TryGetReusableResource();
+            existingResourceRequest.TaskCompletionSource.SetResult(result);
+        }
+
+        private void HandleRemoveResourceRequest(RemoveResourceRequestMessage removeResourceRequest)
+        {
+            var result = TryGetResource(out var resource);
+            if (result)
+            {
+                Interlocked.Decrement(ref _numResources); // We won't return this to the pool, so decrement.
+            }
+
+            removeResourceRequest.TaskCompletionSource.SetResult((result, resource));
+        }
+
         private void HandleResourceAvailable(ResourceAvailableMessage resourceAvailableMessage)
         {
             var resource = resourceAvailableMessage.Resource;
             var timestampedResource = TimestampedResource.Create(resource);
             _availableResources.Enqueue(timestampedResource);
+        }
+
+        private void HandleAddResource(AddResourceMessage addResourceMessage)
+        {
+            // Only add the resource if we didn't already exceed the maximum
+            var success = _availableResources.Count < _maxNumResources;
+            if (success)
+            {
+                var resource = addResourceMessage.Resource;
+                var timestampedResource = TimestampedResource.Create(resource);
+                _availableResources.Enqueue(timestampedResource);
+            }
+            
+            addResourceMessage.ResultTaskCompletionSource.SetResult(success);
         }
 
         private void HandlePurgeExpiredResource(PurgeExpiredResourcesMessage purgeExpiredResourcesMessage)
@@ -316,6 +374,54 @@ namespace AsyncResourcePool
             return taskCompletionSource.Task;
         }
 
+        public bool TryGetExisting(out ReusableResource<TResource> reusableResource)
+        {
+            var taskCompletionSource = new TaskCompletionSource<ReusableResource<TResource>>();
+            var request = new ExistingResourceRequestMessage(taskCompletionSource);
+
+            if (!_messageHandler.Post(request))
+            {
+                taskCompletionSource.SetException(GetObjectDisposedException());
+            }
+
+            // We can wait synchronously for the Task Result because ExistingResourceRequestMessage
+            // will always be handled immediately by the ActionBlock.
+            reusableResource = taskCompletionSource.Task.Result;
+            return reusableResource != null;
+        }
+
+        public bool TryRemove(out TResource resource)
+        {
+            var taskCompletionSource = new TaskCompletionSource<(bool Result, TResource Resource)>();
+            var request = new RemoveResourceRequestMessage(taskCompletionSource);
+
+            if (!_messageHandler.Post(request))
+            {
+                taskCompletionSource.SetException(GetObjectDisposedException());
+            }
+
+            // We can wait synchronously for the Task Result because RemoveResourceRequestMessage
+            // will always be handled immediately by the ActionBlock.
+            bool result;
+            (result, resource) = taskCompletionSource.Task.Result;
+            return result;
+        }
+
+        public bool TryAdd(TResource resource)
+        {
+            var taskCompletionSource = new TaskCompletionSource<bool>();
+            var request = new AddResourceMessage(resource, taskCompletionSource);
+
+            if (!_messageHandler.Post(request))
+            {
+                taskCompletionSource.SetException(GetObjectDisposedException());
+            }
+
+            // We can wait synchronously for the Task Result because RemoveResourceRequestMessage
+            // will always be handled immediately by the ActionBlock.
+            return taskCompletionSource.Task.Result;
+        }
+
         private async void DisposeResource(TResource resource)
         {
             Interlocked.Decrement(ref _numResources);
@@ -362,6 +468,26 @@ namespace AsyncResourcePool
             public readonly CancellationToken CancellationToken;
         }
 
+        private sealed class ExistingResourceRequestMessage : IResourceMessage
+        {
+            public ExistingResourceRequestMessage(TaskCompletionSource<ReusableResource<TResource>> taskCompletionSource)
+            {
+                TaskCompletionSource = taskCompletionSource;
+            }
+
+            public readonly TaskCompletionSource<ReusableResource<TResource>> TaskCompletionSource;
+        }
+
+        private sealed class RemoveResourceRequestMessage : IResourceMessage
+        {
+            public RemoveResourceRequestMessage(TaskCompletionSource<(bool Result, TResource Resource)> taskCompletionSource)
+            {
+                TaskCompletionSource = taskCompletionSource;
+            }
+
+            public readonly TaskCompletionSource<(bool Result, TResource Resource)> TaskCompletionSource;
+        }
+
         private sealed class ResourceAvailableMessage : IResourceMessage
         {
             public ResourceAvailableMessage(TResource resource)
@@ -370,6 +496,18 @@ namespace AsyncResourcePool
             }
 
             public readonly TResource Resource;
+        }
+
+        private sealed class AddResourceMessage : IResourceMessage
+        {
+            public AddResourceMessage(TResource resource, TaskCompletionSource<bool> resultTaskCompletionSource)
+            {
+                Resource = resource;
+                ResultTaskCompletionSource = resultTaskCompletionSource;
+            }
+
+            public readonly TResource Resource;
+            public readonly TaskCompletionSource<bool> ResultTaskCompletionSource;
         }
 
         private sealed class PurgeExpiredResourcesMessage : IResourceMessage
